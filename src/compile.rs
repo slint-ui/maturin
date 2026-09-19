@@ -842,6 +842,20 @@ fn create_build_command(
     Ok(build_command)
 }
 
+/// Whether pyo3 has to be handed a config file rather than left to probe the
+/// interpreter itself.
+///
+/// iOS is the exception: the generated file names no `lib_dir` and records the
+/// abi3 floor as the version, which pyo3 turns into the library to link, so the
+/// build asks for a libpython the framework doesn't ship. See the `lib_name`
+/// handling in `InterpreterConfig::pyo3_config_file` for the same pyo3 behavior
+/// on Android. Probing a runnable interpreter gets the name and the directory
+/// right; an iOS build left with a placeholder interpreter, because none meets
+/// the abi3 floor, still can't be described by a config file and needs `-i`.
+fn needs_pyo3_config_file(is_ios: bool, runnable: bool, force_target_abi: bool) -> bool {
+    !runnable || (force_target_abi && !is_ios)
+}
+
 /// Configure PyO3-related environment variables on the build command.
 fn configure_pyo3_env(
     build_command: &mut Command,
@@ -910,7 +924,7 @@ fn configure_pyo3_env(
         }
 
         if bridge_model.is_pyo3()
-            && (force_target_abi || !interpreter.runnable)
+            && needs_pyo3_config_file(target.is_ios(), interpreter.runnable, force_target_abi)
             && env::var_os("PYO3_CONFIG_FILE").is_none()
         {
             let pyo3_config =
@@ -1252,7 +1266,27 @@ pub(crate) fn ensure_target_maturin_dir(target_dir: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::is_python_entrypoint_symbol;
+    use super::{is_python_entrypoint_symbol, needs_pyo3_config_file};
+
+    #[test]
+    fn pyo3_config_file_is_written_unless_an_ios_interpreter_can_be_probed() {
+        for (is_ios, runnable, force_target_abi, expected) in [
+            // An interpreter that can't run leaves pyo3 nothing to probe.
+            (false, false, false, true),
+            (true, false, true, true),
+            // Otherwise the file is only there to pin the stable ABI family.
+            (false, true, true, true),
+            (false, true, false, false),
+            // Except on iOS, where it would name a libpython that isn't shipped.
+            (true, true, true, false),
+        ] {
+            assert_eq!(
+                needs_pyo3_config_file(is_ios, runnable, force_target_abi),
+                expected,
+                "is_ios={is_ios} runnable={runnable} force_target_abi={force_target_abi}"
+            );
+        }
+    }
 
     #[test]
     fn python_entrypoint_symbol_accepts_pymodexport() {
